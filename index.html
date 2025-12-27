@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Chromatic Echo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Orbitron', sans-serif;
+            touch-action: none; /* Prevent mobile scrolling */
+        }
+        canvas {
+            display: block;
+        }
+        .ui-layer {
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+        }
+        .neon-text {
+            text-shadow: 0 0 5px #fff, 0 0 10px #fff, 0 0 20px #ff00de, 0 0 30px #ff00de, 0 0 40px #ff00de;
+        }
+        .hud-text {
+            text-shadow: 0 0 2px #000;
+        }
+        /* Custom scrollbar hide */
+        ::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="text-white select-none">
+
+    <!-- Game Canvas -->
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- UI Overlay -->
+    <div id="uiLayer" class="absolute inset-0 pointer-events-none flex flex-col justify-between p-6 ui-layer">
+        
+        <!-- HUD -->
+        <div class="flex justify-between items-start w-full">
+            <div class="flex flex-col">
+                <h1 class="text-2xl font-bold tracking-widest text-gray-400 opacity-80">CHROMATIC ECHO</h1>
+                <div class="mt-2 text-sm text-gray-500">SCORE</div>
+                <div id="scoreDisplay" class="text-4xl font-black text-white hud-text">0</div>
+            </div>
+            
+            <!-- Speed / Color Indicator -->
+            <div class="flex flex-col items-end">
+                <div class="text-sm text-gray-500">VELOCITY RESONANCE</div>
+                <div class="w-32 h-4 border border-gray-700 mt-1 relative bg-gray-900 rounded-full overflow-hidden">
+                    <div id="speedBar" class="h-full w-0 transition-colors duration-100 ease-out"></div>
+                </div>
+                <div id="resonanceStatus" class="mt-1 text-xs font-bold text-gray-400">SAFE</div>
+            </div>
+        </div>
+
+        <!-- Start / Game Over Screen -->
+        <div id="menuScreen" class="absolute inset-0 flex flex-col items-center justify-center bg-black/80 pointer-events-auto backdrop-blur-sm transition-opacity duration-500">
+            <h1 class="text-6xl md:text-8xl font-black mb-4 neon-text text-center tracking-tighter">CHROMATIC<br>ECHO</h1>
+            <p class="max-w-md text-center text-gray-300 mb-8 leading-relaxed px-4">
+                Navigate the void. Your speed determines your <span class="text-pink-400">Color</span>.<br>
+                Projectiles are <span class="text-red-500 font-bold">LETHAL</span> only if they match your color.<br>
+                Change speed to shift phase and survive.
+            </p>
+            
+            <div class="flex gap-4 text-sm text-gray-500 mb-8 font-mono">
+                <span>[WASD / ARROWS] to Move</span>
+                <span>•</span>
+                <span>[SHIFT] to Brake</span>
+            </div>
+
+            <button id="startBtn" class="px-10 py-4 border-2 border-white text-white text-xl font-bold hover:bg-white hover:text-black transition-all duration-300 shadow-[0_0_15px_rgba(255,255,255,0.5)] tracking-widest uppercase">
+                Initialize Sequence
+            </button>
+        </div>
+
+        <!-- Game Over UI (Hidden initially) -->
+        <div id="gameOverScreen" class="hidden absolute inset-0 flex flex-col items-center justify-center bg-red-900/20 pointer-events-auto backdrop-blur-md">
+            <h2 class="text-5xl md:text-7xl font-bold text-red-500 mb-2 drop-shadow-[0_0_10px_rgba(255,0,0,0.8)]">SIGNAL LOST</h2>
+            <p class="text-xl text-white mb-6">FINAL SCORE: <span id="finalScore">0</span></p>
+            <button id="restartBtn" class="px-8 py-3 bg-red-600 text-white font-bold hover:bg-red-500 transition-colors shadow-lg uppercase tracking-wider">
+                Re-establish Link
+            </button>
+        </div>
+    </div>
+
+<script>
+/**
+ * CHROMATIC ECHO
+ * A minimalist survival game.
+ */
+
+// --- Configuration & Constants ---
+const CONFIG = {
+    friction: 0.96,
+    acceleration: 0.8,
+    maxSpeed: 12,
+    brakeFactor: 0.85,
+    trailLength: 20,
+    lethalThreshold: 30, // Degrees of Hue difference to be considered a "Match" (Lethal)
+    baseSpawnRate: 60,   // Frames between spawns
+    difficultyRamp: 0.05 // How much spawn rate decreases per second
+};
+
+// --- Global State ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for non-transparent background
+let animationId;
+let lastTime = 0;
+let score = 0;
+let gameActive = false;
+let frames = 0;
+
+// UI Elements
+const ui = {
+    menu: document.getElementById('menuScreen'),
+    gameOver: document.getElementById('gameOverScreen'),
+    score: document.getElementById('scoreDisplay'),
+    finalScore: document.getElementById('finalScore'),
+    startBtn: document.getElementById('startBtn'),
+    restartBtn: document.getElementById('restartBtn'),
+    speedBar: document.getElementById('speedBar'),
+    resonance: document.getElementById('resonanceStatus')
+};
+
+// Input State
+const keys = {
+    w: false, a: false, s: false, d: false,
+    ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false,
+    Shift: false
+};
+
+// Game Entities
+let player;
+let projectiles = [];
+let particles = [];
+let spawnTimer = 0;
+let currentSpawnRate = CONFIG.baseSpawnRate;
+
+// --- Helper Functions ---
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Map speed (0 -> maxSpeed) to Hue (240 -> 0) 
+// Slow = Blue (240), Fast = Red (0/360)
+function getHueFromSpeed(speed) {
+    const ratio = Math.min(speed / CONFIG.maxSpeed, 1);
+    // Mapping: 0 -> 240 (Blue), 1 -> 0 (Red). 
+    // This passes through Cyan, Green, Yellow, Orange.
+    return Math.floor(240 - (ratio * 240));
+}
+
+// Check if two Hues are "matching" (Lethal)
+function isColorMatch(h1, h2) {
+    let diff = Math.abs(h1 - h2);
+    if (diff > 180) diff = 360 - diff; // Handle wrap around
+    return diff < CONFIG.lethalThreshold;
+}
+
+function randomRange(min, max) {
+    return Math.random() * (max - min) + min;
+}
+
+// --- Classes ---
+
+class Player {
+    constructor() {
+        this.x = canvas.width / 2;
+        this.y = canvas.height / 2;
+        this.vx = 0;
+        this.vy = 0;
+        this.radius = 8;
+        this.trail = []; // Stores {x, y, hue}
+        this.hue = 240;
+        this.speed = 0;
+        this.dead = false;
+    }
+
+    update() {
+        // Input Handling
+        if (keys.w || keys.ArrowUp) this.vy -= CONFIG.acceleration;
+        if (keys.s || keys.ArrowDown) this.vy += CONFIG.acceleration;
+        if (keys.a || keys.ArrowLeft) this.vx -= CONFIG.acceleration;
+        if (keys.d || keys.ArrowRight) this.vx += CONFIG.acceleration;
+
+        // Friction & Braking
+        const friction = keys.Shift ? CONFIG.brakeFactor : CONFIG.friction;
+        this.vx *= friction;
+        this.vy *= friction;
+
+        // Velocity Update
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // Boundary Constraint (Bounce)
+        if (this.x < this.radius) { this.x = this.radius; this.vx *= -0.5; }
+        if (this.x > canvas.width - this.radius) { this.x = canvas.width - this.radius; this.vx *= -0.5; }
+        if (this.y < this.radius) { this.y = this.radius; this.vy *= -0.5; }
+        if (this.y > canvas.height - this.radius) { this.y = canvas.height - this.radius; this.vy *= -0.5; }
+
+        // Calculate Speed & Hue
+        this.speed = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+        this.hue = getHueFromSpeed(this.speed);
+
+        // Update Trail
+        this.trail.push({ x: this.x, y: this.y, hue: this.hue });
+        if (this.trail.length > CONFIG.trailLength) {
+            this.trail.shift();
+        }
+
+        // Update UI Speedometer
+        const speedPct = Math.min((this.speed / CONFIG.maxSpeed) * 100, 100);
+        ui.speedBar.style.width = `${speedPct}%`;
+        ui.speedBar.style.backgroundColor = `hsl(${this.hue}, 100%, 50%)`;
+    }
+
+    draw(ctx) {
+        // Draw Trail
+        if (this.trail.length > 1) {
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            for (let i = 0; i < this.trail.length - 1; i++) {
+                const p1 = this.trail[i];
+                const p2 = this.trail[i+1];
+                const alpha = (i / this.trail.length);
+                
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                ctx.lineWidth = this.radius * alpha * 2;
+                ctx.strokeStyle = `hsla(${p1.hue}, 100%, 50%, ${alpha})`;
+                ctx.shadowBlur = 10 * alpha;
+                ctx.shadowColor = `hsl(${p1.hue}, 100%, 50%)`;
+                ctx.stroke();
+            }
+            ctx.shadowBlur = 0; // Reset
+        }
+
+        // Draw Core
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = `hsl(${this.hue}, 100%, 50%)`;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+    }
+}
+
+class Projectile {
+    constructor(x, y, vx, vy, hue, type) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.hue = hue;
+        this.radius = type === 'heavy' ? 12 : 6;
+        this.type = type; // 'normal', 'heavy', 'tracker'
+        this.markedForDeletion = false;
+    }
+
+    update(player) {
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // Tracker logic
+        if (this.type === 'tracker') {
+            const angle = Math.atan2(player.y - this.y, player.x - this.x);
+            this.vx += Math.cos(angle) * 0.1;
+            this.vy += Math.sin(angle) * 0.1;
+            // Cap speed
+            const speed = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+            if (speed > 5) {
+                this.vx = (this.vx/speed) * 5;
+                this.vy = (this.vy/speed) * 5;
+            }
+        }
+
+        // Screen bounds check
+        if (this.x < -50 || this.x > canvas.width + 50 || this.y < -50 || this.y > canvas.height + 50) {
+            this.markedForDeletion = true;
+        }
+
+        // Collision & Phase Logic
+        const dx = this.x - player.x;
+        const dy = this.y - player.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+
+        if (dist < this.radius + player.radius) {
+            // Check Phase
+            if (isColorMatch(player.hue, this.hue)) {
+                // MATCH = LETHAL
+                createExplosion(player.x, player.y, player.hue, 50);
+                gameOver();
+            } else {
+                // MISMATCH = PHASE THROUGH (Score bonus)
+                // Visual feedback for phasing
+                createExplosion(this.x, this.y, this.hue, 5); // Small spark
+                score += 10;
+                ui.score.innerText = score;
+                // Don't delete bullet, let it pass through
+            }
+        }
+    }
+
+    draw(ctx) {
+        ctx.beginPath();
+        if (this.type === 'heavy') {
+            ctx.rect(this.x - this.radius, this.y - this.radius, this.radius*2, this.radius*2);
+        } else {
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        }
+        
+        ctx.fillStyle = `hsl(${this.hue}, 100%, 50%)`;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = `hsl(${this.hue}, 100%, 50%)`;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // Core
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+class Particle {
+    constructor(x, y, hue) {
+        this.x = x;
+        this.y = y;
+        this.hue = hue;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 4 + 1;
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.life = 1.0;
+        this.decay = Math.random() * 0.03 + 0.01;
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life -= this.decay;
+    }
+
+    draw(ctx) {
+        ctx.globalAlpha = this.life;
+        ctx.fillStyle = `hsl(${this.hue}, 100%, 60%)`;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+function createExplosion(x, y, hue, count) {
+    for (let i = 0; i < count; i++) {
+        particles.push(new Particle(x, y, hue));
+    }
+}
+
+// --- Spawning Logic ---
+
+function spawnProjectile() {
+    // Determine spawn edge
+    const edge = Math.floor(Math.random() * 4); // 0:top, 1:right, 2:bottom, 3:left
+    let x, y, vx, vy;
+    
+    // Determine color based on difficulty or random
+    // We want colors that force the player to change speed.
+    // Random hue from 0 to 240
+    const hue = Math.floor(Math.random() * 240); 
+    
+    // Determine type
+    const typeRoll = Math.random();
+    let type = 'normal';
+    let speed = randomRange(3, 7);
+
+    if (typeRoll > 0.9) {
+        type = 'tracker';
+        speed = 2;
+    } else if (typeRoll > 0.8) {
+        type = 'heavy';
+        speed = 2;
+    }
+
+    switch(edge) {
+        case 0: // Top
+            x = Math.random() * canvas.width;
+            y = -20;
+            vx = (Math.random() - 0.5) * 2;
+            vy = speed;
+            break;
+        case 1: // Right
+            x = canvas.width + 20;
+            y = Math.random() * canvas.height;
+            vx = -speed;
+            vy = (Math.random() - 0.5) * 2;
+            break;
+        case 2: // Bottom
+            x = Math.random() * canvas.width;
+            y = canvas.height + 20;
+            vx = (Math.random() - 0.5) * 2;
+            vy = -speed;
+            break;
+        case 3: // Left
+            x = -20;
+            y = Math.random() * canvas.height;
+            vx = speed;
+            vy = (Math.random() - 0.5) * 2;
+            break;
+    }
+
+    // Aim at player slightly for normal bullets to increase pressure
+    if (type === 'normal' && Math.random() > 0.5) {
+        const angle = Math.atan2(player.y - y, player.x - x);
+        vx = Math.cos(angle) * speed;
+        vy = Math.sin(angle) * speed;
+    }
+
+    projectiles.push(new Projectile(x, y, vx, vy, hue, type));
+}
+
+// --- Game Loop ---
+
+function initGame() {
+    player = new Player();
+    projectiles = [];
+    particles = [];
+    score = 0;
+    frames = 0;
+    currentSpawnRate = CONFIG.baseSpawnRate;
+    ui.score.innerText = '0';
+    ui.menu.style.opacity = '0';
+    ui.menu.style.pointerEvents = 'none';
+    ui.gameOver.classList.add('hidden');
+    
+    gameActive = true;
+    animate();
+}
+
+function gameOver() {
+    gameActive = false;
+    ui.finalScore.innerText = score;
+    ui.gameOver.classList.remove('hidden');
+}
+
+function animate(timestamp) {
+    if (!gameActive) return;
+
+    // Clear Canvas with Fade Effect (Trails)
+    ctx.fillStyle = 'rgba(5, 5, 5, 0.3)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Update Logic
+    player.update();
+    
+    // Spawning
+    frames++;
+    if (frames % Math.floor(currentSpawnRate) === 0) {
+        spawnProjectile();
+        // Ramp difficulty
+        if (currentSpawnRate > 10) currentSpawnRate -= CONFIG.difficultyRamp;
+    }
+
+    // Update Entities
+    projectiles.forEach((p, index) => {
+        p.update(player);
+        p.draw(ctx);
+        if (p.markedForDeletion) projectiles.splice(index, 1);
+    });
+
+    particles.forEach((p, index) => {
+        p.update();
+        p.draw(ctx);
+        if (p.life <= 0) particles.splice(index, 1);
+    });
+
+    player.draw(ctx);
+
+    // Resonance Check for UI
+    // Find closest bullet
+    let closestDist = Infinity;
+    let closestHue = 0;
+    
+    for (let p of projectiles) {
+        const dx = p.x - player.x;
+        const dy = p.y - player.y;
+        const d = Math.sqrt(dx*dx + dy*dy);
+        if (d < closestDist) {
+            closestDist = d;
+            closestHue = p.hue;
+        }
+    }
+
+    if (closestDist < 200) {
+        const match = isColorMatch(player.hue, closestHue);
+        ui.resonance.innerText = match ? "LETHAL RESONANCE DETECTED" : "PHASE OK";
+        ui.resonance.className = match ? "mt-1 text-xs font-bold text-red-500 animate-pulse" : "mt-1 text-xs font-bold text-green-400";
+    } else {
+        ui.resonance.innerText = "SAFE";
+        ui.resonance.className = "mt-1 text-xs font-bold text-gray-400";
+    }
+
+    score++;
+    if (frames % 10 === 0) ui.score.innerText = Math.floor(score / 10);
+
+    animationId = requestAnimationFrame(animate);
+}
+
+// --- Input Listeners ---
+
+window.addEventListener('keydown', (e) => {
+    if (keys.hasOwnProperty(e.key) || keys.hasOwnProperty(e.code)) {
+        keys[e.key] = true;
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    if (keys.hasOwnProperty(e.key) || keys.hasOwnProperty(e.code)) {
+        keys[e.key] = false;
+    }
+});
+
+// Start Buttons
+ui.startBtn.addEventListener('click', initGame);
+ui.restartBtn.addEventListener('click', () => {
+    // Reset canvas fully
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    initGame();
+});
+
+// Initial Render
+ctx.fillStyle = '#050505';
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+</script>
+</body>
+</html>
